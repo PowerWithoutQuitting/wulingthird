@@ -1,0 +1,28 @@
+# Android
+*.apk
+*.ap_
+*.aab
+build/
+.gradle/
+local.properties
+wulingscr.js
+*.iml
+*.hprof
+.cxx/
+*.keystore
+!debug.keystore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Tools
+tools/
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/settings.json
