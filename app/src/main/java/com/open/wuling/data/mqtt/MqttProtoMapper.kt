@@ -22,6 +22,14 @@ object MqttProtoMapper {
         // field 3 → isLocked (areEqual(v,"0") → "0"=已锁)
         fields[3]?.let { v -> s = s.copy(isLocked = v == "0") }
 
+        // field 4 → isWindowOpen (areEqual(v,"1"))
+        fields[4]?.let { v -> s = s.copy(isWindowOpen = v == "1") }
+
+        // field 5 → isCharging (当field 33存在时, areEqual(v,"0") → "0"=充电中)
+        if (fields.containsKey(33)) {
+            fields[5]?.let { v -> s = s.copy(isCharging = v == "0") }
+        }
+
         // field 7 → lowBeamLight (vs "1")
         fields[7]?.let { v -> s = s.copy(lowBeamLight = v == "1") }
 
@@ -52,18 +60,7 @@ object MqttProtoMapper {
         // field 27 → keyStatus
         fields[27]?.let { v -> s = s.copy(keyStatus = v) }
 
-        // field 75 → tirePressure (comma-separated: FL,FR,RL,RR)
-        fields[75]?.let { v ->
-            val parts = v.split(",", ";")
-            if (parts.size >= 4) {
-                s = s.copy(
-                    tirePressureFL = parts[0].toDoubleOrNull() ?: s.tirePressureFL,
-                    tirePressureFR = parts[1].toDoubleOrNull() ?: s.tirePressureFR,
-                    tirePressureRL = parts[2].toDoubleOrNull() ?: s.tirePressureRL,
-                    tirePressureRR = parts[3].toDoubleOrNull() ?: s.tirePressureRR
-                )
-            }
-        }
+        // field 75 → tirePressure: 不通过MQTT更新，保持API读取的值
 
         return s
     }

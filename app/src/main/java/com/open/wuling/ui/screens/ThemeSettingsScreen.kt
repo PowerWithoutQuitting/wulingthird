@@ -544,9 +544,9 @@ private fun ColorPickerDialog(
     onColorSelected: (Color) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var red by remember { mutableIntStateOf(android.graphics.Color.red(currentColor.toArgb())) }
-    var green by remember { mutableIntStateOf(android.graphics.Color.green(currentColor.toArgb())) }
-    var blue by remember { mutableIntStateOf(android.graphics.Color.blue(currentColor.toArgb())) }
+    var red by remember { mutableStateOf(android.graphics.Color.red(currentColor.toArgb())) }
+    var green by remember { mutableStateOf(android.graphics.Color.green(currentColor.toArgb())) }
+    var blue by remember { mutableStateOf(android.graphics.Color.blue(currentColor.toArgb())) }
 
     val previewColor = Color(red, green, blue)
 

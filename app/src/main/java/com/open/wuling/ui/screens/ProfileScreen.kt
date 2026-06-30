@@ -108,6 +108,9 @@ fun ProfileScreen(
     var mqttClientIdInput by remember { mutableStateOf("") }
     var mqttUsernameInput by remember { mutableStateOf("") }
     var mqttPasswordInput by remember { mutableStateOf("") }
+    var mqttAutoLoading by remember { mutableStateOf(false) }
+    var mqttAutoError by remember { mutableStateOf<String?>(null) }
+    var showManualMqtt by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -620,94 +623,184 @@ fun ProfileScreen(
             } catch (_: Exception) {}
         }
         AlertDialog(
-            onDismissRequest = { showMqttDialog = false },
+            onDismissRequest = { showMqttDialog = false; mqttAutoError = null },
             title = {
                 Text(text = "MQTT 配置", fontWeight = FontWeight.Bold)
             },
             text = {
                 Column {
+                    // ── 一键连接区域 ──
+                    val vin = selectedVehicle?.vin.orEmpty()
+                    val phone = selectedVehicle?.carInfo?.bindCarUserMobile.orEmpty()
+                    val canAutoConnect = vin.isNotEmpty() && phone.isNotEmpty()
+
                     Text(
-                        text = "输入 MQTT Broker 的 clientId、username（token）和 password",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "自动获取MQTT凭据并连接",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "默认 Broker: tcp://parkingdata.sgmwcloud.com.cn:1883",
+                        text = if (canAutoConnect)
+                            "VIN: ${vin.take(6)}...  手机: ${phone.takeLast(4)}"
+                        else
+                            "需要先选择车辆且车辆信息包含绑定手机号",
                         fontSize = 12.sp,
-                        color = PrimaryGreen
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (mqttAutoError != null) {
+                        Text(
+                            text = mqttAutoError!!,
+                            fontSize = 12.sp,
+                            color = PrimaryRed
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+
+                    Button(
+                        onClick = {
+                            mqttAutoLoading = true
+                            mqttAutoError = null
+                            viewModel.vehicleManager.fetchAndConnectMqtt { result ->
+                                mqttAutoLoading = false
+                                result.onSuccess {
+                                    showMqttDialog = false
+                                }.onFailure { e ->
+                                    mqttAutoError = e.message
+                                }
+                            }
+                        },
+                        enabled = canAutoConnect && !mqttAutoLoading,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PrimaryGreen
+                        )
+                    ) {
+                        if (mqttAutoLoading) {
+                            LinearProgressIndicator(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp),
+                                color = Color.White,
+                                trackColor = Color.White.copy(alpha = 0.3f)
+                            )
+                        } else {
+                            Text("一键连接 MQTT")
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(12.dp))
-
-                    OutlinedTextField(
-                        value = mqttBrokerInput,
-                        onValueChange = { mqttBrokerInput = it },
-                        label = { Text("Broker") },
-                        placeholder = { Text("tcp://parkingdata.sgmwcloud.com.cn:1883") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    Divider(color = MaterialTheme.colorScheme.surfaceVariant)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    OutlinedTextField(
-                        value = mqttClientIdInput,
-                        onValueChange = { mqttClientIdInput = it },
-                        label = { Text("Client ID") },
-                        placeholder = { Text("clientId") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    // ── 手动配置（折叠） ──
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showManualMqtt = !showManualMqtt },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "手动配置",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            imageVector = Icons.Filled.ChevronRight,
+                            contentDescription = "展开",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
-                    OutlinedTextField(
-                        value = mqttUsernameInput,
-                        onValueChange = { mqttUsernameInput = it },
-                        label = { Text("Username（token）") },
-                        placeholder = { Text("username") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    if (showManualMqtt) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "默认 Broker: tcp://parkingdata.sgmwcloud.com.cn:1883",
+                            fontSize = 11.sp,
+                            color = PrimaryGreen
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
 
-                    OutlinedTextField(
-                        value = mqttPasswordInput,
-                        onValueChange = { mqttPasswordInput = it },
-                        label = { Text("Password") },
-                        placeholder = { Text("password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                        OutlinedTextField(
+                            value = mqttBrokerInput,
+                            onValueChange = { mqttBrokerInput = it },
+                            label = { Text("Broker") },
+                            placeholder = { Text("tcp://parkingdata.sgmwcloud.com.cn:1883") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        OutlinedTextField(
+                            value = mqttClientIdInput,
+                            onValueChange = { mqttClientIdInput = it },
+                            label = { Text("Client ID") },
+                            placeholder = { Text("clientId") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        OutlinedTextField(
+                            value = mqttUsernameInput,
+                            onValueChange = { mqttUsernameInput = it },
+                            label = { Text("Username") },
+                            placeholder = { Text("username") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        OutlinedTextField(
+                            value = mqttPasswordInput,
+                            onValueChange = { mqttPasswordInput = it },
+                            label = { Text("Password") },
+                            placeholder = { Text("password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        val broker = mqttBrokerInput.trim().ifEmpty { "tcp://parkingdata.sgmwcloud.com.cn:1883" }
-                        if (mqttClientIdInput.trim().isNotEmpty() &&
-                            mqttUsernameInput.trim().isNotEmpty() &&
-                            mqttPasswordInput.trim().isNotEmpty()
-                        ) {
-                            val vin = selectedVehicle?.vin.orEmpty()
-                            viewModel.vehicleManager.updateMqttCredentials(
-                                broker = broker,
-                                clientId = mqttClientIdInput.trim(),
-                                username = mqttUsernameInput.trim(),
-                                password = mqttPasswordInput.trim(),
-                                vin = vin
-                            )
-                            showMqttDialog = false
-                        }
-                    },
-                    enabled = mqttClientIdInput.trim().isNotEmpty() &&
-                              mqttUsernameInput.trim().isNotEmpty() &&
-                              mqttPasswordInput.trim().isNotEmpty()
-                ) {
-                    Text("保存并连接")
+                if (showManualMqtt) {
+                    Button(
+                        onClick = {
+                            val broker = mqttBrokerInput.trim().ifEmpty { "tcp://parkingdata.sgmwcloud.com.cn:1883" }
+                            if (mqttClientIdInput.trim().isNotEmpty() &&
+                                mqttUsernameInput.trim().isNotEmpty() &&
+                                mqttPasswordInput.trim().isNotEmpty()
+                            ) {
+                                val vin = selectedVehicle?.vin.orEmpty()
+                                viewModel.vehicleManager.updateMqttCredentials(
+                                    broker = broker,
+                                    clientId = mqttClientIdInput.trim(),
+                                    username = mqttUsernameInput.trim(),
+                                    password = mqttPasswordInput.trim(),
+                                    vin = vin
+                                )
+                                showMqttDialog = false
+                            }
+                        },
+                        enabled = mqttClientIdInput.trim().isNotEmpty() &&
+                                  mqttUsernameInput.trim().isNotEmpty() &&
+                                  mqttPasswordInput.trim().isNotEmpty()
+                    ) {
+                        Text("保存并连接")
+                    }
+                } else {
+                    TextButton(onClick = { showMqttDialog = false }) {
+                        Text("关闭")
+                    }
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showMqttDialog = false }) {
+                TextButton(onClick = { showMqttDialog = false; mqttAutoError = null }) {
                     Text("取消")
                 }
             },

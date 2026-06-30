@@ -55,11 +55,11 @@ fun BleAutoLockSheet(
     val lockDuration by preferences.lockDuration.collectAsState(initial = DEFAULT_LOCK_DURATION)
     val cooldownTime by preferences.cooldownTime.collectAsState(initial = DEFAULT_COOLDOWN_TIME)
 
-    var localUnlockRssi by remember { mutableIntStateOf(unlockRssi) }
-    var localUnlockDuration by remember { mutableIntStateOf(unlockDuration) }
-    var localLockRssi by remember { mutableIntStateOf(lockRssi) }
-    var localLockDuration by remember { mutableIntStateOf(lockDuration) }
-    var localCooldownTime by remember { mutableIntStateOf(cooldownTime) }
+    var localUnlockRssi by remember { mutableStateOf(unlockRssi) }
+    var localUnlockDuration by remember { mutableStateOf(unlockDuration) }
+    var localLockRssi by remember { mutableStateOf(lockRssi) }
+    var localLockDuration by remember { mutableStateOf(lockDuration) }
+    var localCooldownTime by remember { mutableStateOf(cooldownTime) }
 
     LaunchedEffect(unlockRssi) { localUnlockRssi = unlockRssi }
     LaunchedEffect(unlockDuration) { localUnlockDuration = unlockDuration }
@@ -393,8 +393,8 @@ fun BleAutoLockSheet(
             val bleVin by preferences.bleVin.collectAsState(initial = "")
             val connectTimeout by preferences.connectTimeout.collectAsState(initial = BleAutoLockPreferences.DEFAULT_CONNECT_TIMEOUT)
             val authTimeout by preferences.authTimeout.collectAsState(initial = BleAutoLockPreferences.DEFAULT_AUTH_TIMEOUT)
-            var localConnectTimeout by remember { mutableIntStateOf(connectTimeout) }
-            var localAuthTimeout by remember { mutableIntStateOf(authTimeout) }
+            var localConnectTimeout by remember { mutableStateOf(connectTimeout) }
+            var localAuthTimeout by remember { mutableStateOf(authTimeout) }
             LaunchedEffect(connectTimeout) { localConnectTimeout = connectTimeout }
             LaunchedEffect(authTimeout) { localAuthTimeout = authTimeout }
 

@@ -3,6 +3,7 @@ package com.open.wuling.data.repository
 import com.open.wuling.data.api.APIConfig
 import com.open.wuling.data.api.APIError
 import com.open.wuling.data.api.BleKeyResponse
+import com.open.wuling.data.api.MqttAuthResponse
 import com.open.wuling.data.api.CarStatusResponse
 import com.open.wuling.data.api.CheckStatusResponse
 import com.open.wuling.data.api.CommandResponse
@@ -307,6 +308,14 @@ class VehicleRepository @Inject constructor(
             return@withContext Result.failure(APIError("请先配置 Access Token"))
         }
         api.queryBleKey(vin, userId)
+    }
+
+    /** 获取MQTT连接凭据（自动从API获取token并本地计算username/password） */
+    suspend fun fetchMqttCredentials(vin: String, phone: String): Result<MqttAuthResponse> = withContext(Dispatchers.IO) {
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+        api.getMqttCredentials(vin, phone)
     }
 
     private fun createFallbackVehicle(): Vehicle {

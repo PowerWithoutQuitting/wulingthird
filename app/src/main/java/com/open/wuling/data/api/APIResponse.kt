@@ -355,5 +355,29 @@ data class BleKeyData(
     @SerializedName("vin") val vin: String? = null
 )
 
-// ============== API Error ==============
+// ============== MQTT Auth ===============
+data class MqttAuthApiResponse(
+    @SerializedName("success") val success: Boolean? = null,
+    @SerializedName("result") val result: Boolean? = null,
+    @SerializedName("errorCode") val errorCode: String? = null,
+    @SerializedName("errorMessage") val errorMessage: String? = null,
+    @SerializedName("data") val data: MqttAuthData? = null,
+    @SerializedName("message") val message: String? = null
+) {
+    val isSuccess: Boolean
+        get() = success == true || result == true || errorCode == "0" || errorCode == null
+}
+
+data class MqttAuthData(
+    @SerializedName("token") val token: String? = null
+)
+
+/** MQTT连接凭据（由客户端根据API返回的token本地计算生成） */
+data class MqttAuthResponse(
+    val username: String,   // MD5(vin.take(6) + token)
+    val password: String,   // MD5(clientId.takeLast(6) + token)
+    val clientId: String    // vin + "_" + phone.takeLast(4)
+)
+
+// ============== API Error ===============
 class APIError(message: String) : Exception(message)

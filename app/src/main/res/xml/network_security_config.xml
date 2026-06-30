@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext (non-TLS) traffic to MQTT broker -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">parkingdata.sgmwcloud.com.cn</domain>
+    </domain-config>
+</network-security-config>

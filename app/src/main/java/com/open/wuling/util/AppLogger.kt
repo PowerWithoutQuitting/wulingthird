@@ -24,10 +24,12 @@ object AppLogger {
         val details: String? = null
     ) {
         val formattedTime: String
-            get() = dateFormat.format(Date(timestamp))
+            get() = threadLocalFormat.get().format(Date(timestamp))
 
         companion object {
-            private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
+            private val threadLocalFormat = ThreadLocal.withInitial {
+                SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
+            }
         }
     }
 

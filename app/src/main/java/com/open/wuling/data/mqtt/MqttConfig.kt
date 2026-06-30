@@ -1,7 +1,7 @@
 package com.open.wuling.data.mqtt
 
 /**
- * MQTT 连接配置 — 完全对齐 v2.9.8
+ * MQTT 连接配置
  *
  * Topic 格式: {VIN}/prod/sgmw/vehicle/{suffix}
  * 所有 topic 的 QoS 均为 1

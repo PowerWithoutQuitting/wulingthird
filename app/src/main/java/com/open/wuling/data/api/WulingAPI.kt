@@ -578,6 +578,90 @@ class WulingAPI @Inject constructor() {
         }
     }
 
+    // ── MQTT 凭据生成（逆向自官方App DEX） ──────────────────
+
+    /**
+     * MD5哈希，返回32位小写十六进制字符串
+     * 逆向自 WulingAPI.access$md5Hex
+     */
+    private fun md5Hex(text: String): String {
+        val md = MessageDigest.getInstance("MD5")
+        val digest = md.digest(text.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * 一键获取MQTT连接凭据
+     *
+     * 流程:
+     * 1. POST /base/mqtt/auth {"vin":"xxx","type":3} 获取 token
+     * 2. 本地计算凭据:
+     *    - clientId = vin + "_" + phone.takeLast(4)
+     *    - username = MD5(vin.take(6) + token)
+     *    - password = MD5(clientId.takeLast(6) + token)
+     *
+     * @param vin  车架号
+     * @param phone 绑定手机号（完整号码，取后4位用于clientId）
+     */
+    suspend fun getMqttCredentials(vin: String, phone: String): Result<MqttAuthResponse> = withContext(Dispatchers.IO) {
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+        if (vin.isEmpty()) {
+            return@withContext Result.failure(APIError("VIN 不能为空"))
+        }
+
+        executeWithRetry {
+            requestMutex.withLock {
+                try {
+                    val timestamp = System.currentTimeMillis().toString()
+                    val nonce = generateRandomLetters(16)
+                    val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
+                    // 构建请求体: {"vin":"xxx","type":3}
+                    val jsonBody = """{"vin":"$vin","type":3}"""
+                    Log.d(TAG, "MQTT Auth 请求: vin=${vin.take(6)}...")
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/base/mqtt/auth")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+                    headers.forEach { (key, value) -> requestBuilder.header(key, value) }
+
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
+
+                    if (body != null) {
+                        val authResponse = gson.fromJson(body, MqttAuthApiResponse::class.java)
+                        if (!authResponse.isSuccess) {
+                            val errorMsg = authResponse.errorMessage ?: authResponse.message ?: "MQTT Auth 失败"
+                            return@withLock Result.failure(APIError(errorMsg))
+                        }
+
+                        val token = authResponse.data?.token
+                        if (token.isNullOrEmpty()) {
+                            return@withLock Result.failure(APIError("MQTT Auth API 未返回 token"))
+                        }
+
+                        Log.d(TAG, "MQTT Auth 获取 token 成功: ${token.take(8)}...")
+
+                        // 本地计算凭据（逆向自官方App DEX字节码）
+                        val clientId = "${vin}_${phone.takeLast(4)}"
+                        val username = md5Hex("${vin.take(6)}$token")
+                        val password = md5Hex("${clientId.takeLast(6)}$token")
+
+                        Log.d(TAG, "MQTT 凭据生成完成: clientId=$clientId")
+                        Result.success(MqttAuthResponse(username, password, clientId))
+                    } else {
+                        Result.failure(APIError("网络错误：响应体为空"))
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "获取 MQTT 凭据异常: ${e.message}", e)
+                    Result.failure(APIError(e.message ?: "网络错误"))
+                }
+            }
+        }
+    }
+
 }
 
 // Extension to convert API response to VehicleStatus

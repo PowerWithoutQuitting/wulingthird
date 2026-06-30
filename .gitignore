@@ -26,3 +26,24 @@ tools/
 .DS_Store
 Thumbs.db
 .claude/settings.json
+
+# JoyCode
+.joycode/
+
+# Python decompile scripts (internal analysis tools)
+*.py
+
+# DEX decompiled output (internal analysis)
+dex_decompiled/
+dex_*.txt
+
+# Analysis reports with sensitive algorithm details
+MQTT_CREDENTIAL_ALGORITHM.md
+API_COMPARISON_REPORT.md
+CODE_REVIEW_REPORT.md
+
+# Screenshot images (internal debug artifacts)
+Image_*.jpg
+
+# TXT analysis outputs
+*.txt

@@ -41,8 +41,8 @@ fun ACControlSheet(
 ) {
     if (!isOpen) return
 
-    var temperature by remember { mutableIntStateOf(currentTemp) }
-    var fanLevel by remember { mutableIntStateOf(currentFanLevel) }
+    var temperature by remember { mutableStateOf(currentTemp) }
+    var fanLevel by remember { mutableStateOf(currentFanLevel) }
 
     ModalBottomSheet(
         onDismissRequest = onClose,

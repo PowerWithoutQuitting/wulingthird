@@ -67,7 +67,9 @@ object NativeFreeProtocolUtils {
     // ── AES-128-ECB/NoPadding ────────────────────────────────────
 
     @Volatile private var cipher: Cipher? = null
-    private fun getCipher() = cipher ?: Cipher.getInstance("AES/ECB/NoPadding").also { cipher = it }
+    private fun getCipher(): Cipher = synchronized(this) {
+        cipher ?: Cipher.getInstance("AES/ECB/NoPadding").also { cipher = it }
+    }
 
     fun aesEcbDecrypt(key: ByteArray, ciphertext: ByteArray): ByteArray {
         require(key.size == 16 && ciphertext.size % 16 == 0)

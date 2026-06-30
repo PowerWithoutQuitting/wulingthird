@@ -149,6 +149,41 @@ class VehicleManager @Inject constructor(
         }
     }
 
+    /** 一键获取MQTT凭据并连接（自动从API获取token，本地计算username/password） */
+    fun fetchAndConnectMqtt(onResult: ((Result<String>) -> Unit)? = null) {
+        scope.launch {
+            val vehicle = _selectedVehicle.value
+            val vin = vehicle?.vin.orEmpty()
+            val phone = vehicle?.carInfo?.bindCarUserMobile.orEmpty()
+
+            if (vin.isEmpty()) {
+                onResult?.invoke(Result.failure(Exception("请先选择车辆")))
+                return@launch
+            }
+            if (phone.isEmpty()) {
+                onResult?.invoke(Result.failure(Exception("车辆信息中无绑定手机号，请先刷新车辆状态")))
+                return@launch
+            }
+
+            Log.d(TAG, "一键获取MQTT凭据: vin=${vin.take(6)}..., phone=${phone.takeLast(4)}")
+            val result = vehicleRepository.fetchMqttCredentials(vin, phone)
+            result.onSuccess { creds ->
+                Log.d(TAG, "MQTT凭据获取成功: clientId=${creds.clientId}")
+                updateMqttCredentials(
+                    broker = com.open.wuling.data.mqtt.MqttConfig.DEFAULT_BROKER,
+                    clientId = creds.clientId,
+                    username = creds.username,
+                    password = creds.password,
+                    vin = vin
+                )
+                onResult?.invoke(Result.success("MQTT凭据获取成功，正在连接..."))
+            }.onFailure { e ->
+                Log.e(TAG, "MQTT凭据获取失败: ${e.message}")
+                onResult?.invoke(Result.failure(Exception("获取MQTT凭据失败: ${e.message}")))
+            }
+        }
+    }
+
     /** 用当前车辆 VIN 连接 MQTT */
     private fun connectMqtt() {
         val vehicle = _selectedVehicle.value

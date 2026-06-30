@@ -302,7 +302,7 @@ fun MainScreen(
     val scannedDevices by bleManager.scannedDevices.collectAsState()
     val isScanningAll by bleManager.isScanningAll.collectAsState()
 
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by remember { mutableStateOf(0) }
     var showACControl by remember { mutableStateOf(false) }
     var showWindowControl by remember { mutableStateOf(false) }
     var showBleSettings by remember { mutableStateOf(false) }

@@ -82,6 +82,7 @@ data class VehicleStatus(
     val climateTemperature: Int = 24,
     val doors: DoorStatus = DoorStatus(),
     val windows: WindowStatus = WindowStatus(),
+    val isWindowOpen: Boolean = false,
     val mileage: Int = 12580,
     val isCharging: Boolean = false,
     val chargingTimeRemaining: Int? = null,
