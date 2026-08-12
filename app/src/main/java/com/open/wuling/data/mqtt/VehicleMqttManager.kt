@@ -141,15 +141,14 @@ class VehicleMqttManager @Inject constructor(
 
     // ── 内部状态 ───────────────────────────────────────────
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var client: MqttClient? = null
-    private var currentVin: String = ""
-    private var currentClientId: String = ""
-    private var currentUsername: String = ""
-    private var currentPassword: String = ""
+    @Volatile private var client: MqttClient? = null
+    @Volatile private var currentVin: String = ""
+    @Volatile private var currentClientId: String = ""
+    @Volatile private var currentUsername: String = ""
+    @Volatile private var currentPassword: String = ""
     private val shouldReconnect = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
-    private var connectingTimestamp: Long = 0
-    private var retryCount = 0
+    @Volatile private var retryCount = 0
 
     private val _connectionState = MutableStateFlow(MqttConnectionState.DISCONNECTED)
     val connectionState: StateFlow<MqttConnectionState> = _connectionState.asStateFlow()
@@ -158,18 +157,23 @@ class VehicleMqttManager @Inject constructor(
 
     @Volatile var connectedVin: String = ""; private set
 
-    var onVehicleStatusProto: ((Map<Int, String>) -> Unit)? = null
-    var onAuthorizationNotify: ((Boolean, ByteArray) -> Unit)? = null
-    var onParkingNotify: ((ByteArray) -> Unit)? = null
-    var onConnected: (() -> Unit)? = null
+    @Volatile var onVehicleStatusProto: ((Map<Int, String>) -> Unit)? = null
+    @Volatile var onAuthorizationNotify: ((Boolean, ByteArray) -> Unit)? = null
+    @Volatile var onParkingNotify: ((ByteArray) -> Unit)? = null
+    @Volatile var onConnected: (() -> Unit)? = null
 
     // ── connectAsync ───────────────────────────────────────
     fun connectAsync(clientId: String, username: String, password: String, vin: String) {
-        if (isConnecting.get()) { addLog("已有连接进行中，跳过"); return }
+        if (!isConnecting.compareAndSet(false, true)) {
+            addLog("已有连接进行中，跳过"); return
+        }
         currentVin = vin; currentClientId = clientId
         currentUsername = username; currentPassword = password
         shouldReconnect.set(true)
-        scope.launch { doConnect(clientId, username, password, vin) }
+        scope.launch {
+            try { doConnect(clientId, username, password, vin) }
+            finally { isConnecting.set(false) }
+        }
     }
 
     fun connect() {
@@ -194,15 +198,8 @@ class VehicleMqttManager @Inject constructor(
         addLog("========== MQTT 连接开始 ==========")
         addLog("  ClientId: $cid  VIN: $localVin")
 
-        disconnect()
+        disconnectInternal()
         shouldReconnect.set(savedReconnect)
-        // 锁超时检查：如果上次连接卡住超过 60 秒，强制释放
-        if (isConnecting.get() && System.currentTimeMillis() - connectingTimestamp > 60_000L) {
-            addLog("isConnecting 锁超时，强制释放")
-            isConnecting.set(false)
-        }
-        isConnecting.set(true)
-        connectingTimestamp = System.currentTimeMillis()
         currentVin = localVin; currentClientId = cid
         currentUsername = uname; currentPassword = pwd
 
@@ -275,7 +272,7 @@ class VehicleMqttManager @Inject constructor(
             addLog("✗ 异常: ${e.message}")
             _connectionState.value = MqttConnectionState.FAILED
             if (shouldReconnect.get()) { scheduleReconnect() }
-        } finally { isConnecting.set(false) }
+        }
         @Suppress("UNUSED_EXPRESSION")
         Unit
     }
@@ -303,7 +300,7 @@ class VehicleMqttManager @Inject constructor(
         addLog("重连: ${d}ms 第$retryCount 次")
         delay(d)
         if (!shouldReconnect.get() || client?.isConnected == true) return
-        doConnect(currentClientId, currentUsername, currentPassword, currentVin)
+        connectAsync(currentClientId, currentUsername, currentPassword, currentVin)
     }
 
     fun publish(topic: String, payload: String) {
@@ -318,14 +315,17 @@ class VehicleMqttManager @Inject constructor(
 
     fun disconnect() {
         shouldReconnect.set(false)
-        scope.launch(Dispatchers.IO) {
-            isConnecting.set(false)
-            try { client?.disconnect() } catch (_: Exception) {}
-            try { client?.close() } catch (_: Exception) {}
-            client = null
-            _connectionState.value = MqttConnectionState.DISCONNECTED
-            addLog("MQTT 已断开")
-        }
+        isConnecting.set(false)
+        scope.launch { disconnectInternal() }
+    }
+
+    private suspend fun disconnectInternal() = withContext(Dispatchers.IO) {
+        val oldClient = client
+        client = null
+        try { oldClient?.disconnect() } catch (_: Exception) {}
+        try { oldClient?.close() } catch (_: Exception) {}
+        _connectionState.value = MqttConnectionState.DISCONNECTED
+        addLog("MQTT 已断开")
     }
 
     fun clearLogs() { _logs.value = emptyList() }

@@ -38,6 +38,7 @@ import javax.inject.Singleton
  * 负责蓝牙扫描、连接、RSSI 监控和自动解锁/上锁逻辑
  */
 @Singleton
+@Suppress("DEPRECATION")
 class BleAutoLockManager @Inject constructor(
     @ApplicationContext private val context: Context,
     val preferences: BleAutoLockPreferences
@@ -256,6 +257,7 @@ class BleAutoLockManager @Inject constructor(
             addLog("特征写入: ${characteristic?.uuid}, status=$status")
         }
 
+        @Deprecated("Deprecated in API 33")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt?,
             characteristic: BluetoothGattCharacteristic?
@@ -295,8 +297,12 @@ class BleAutoLockManager @Inject constructor(
                 addLog("启用通知1 (0x2A6F)")
                 gatt.setCharacteristicNotification(notifyChar1, true)
                 val descriptor = notifyChar1.getDescriptor(java.util.UUID.fromString("00002902-0000-1000-8000-00805F9B34FB"))
-                descriptor?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
+                if (descriptor != null) {
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    gatt.writeDescriptor(descriptor)
+                } else {
+                    addLog("找不到 CCCD 描述符 (通知1)")
+                }
             } else {
                 addLog("找不到通知特征1 (0x2A6F)")
             }
@@ -316,8 +322,12 @@ class BleAutoLockManager @Inject constructor(
                 addLog("启用通知2 (0x2A7F)")
                 gatt.setCharacteristicNotification(notifyChar2, true)
                 val descriptor = notifyChar2.getDescriptor(java.util.UUID.fromString("00002902-0000-1000-8000-00805F9B34FB"))
-                descriptor?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
+                if (descriptor != null) {
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    gatt.writeDescriptor(descriptor)
+                } else {
+                    addLog("找不到 CCCD 描述符 (通知2)")
+                }
             } else {
                 addLog("找不到通知特征2 (0x2A7F)")
                 startAuthAfterDelay(gatt)
@@ -528,12 +538,12 @@ class BleAutoLockManager @Inject constructor(
 
     private fun observePreferences() {
         scope.launch {
-            preferences.enabled.collect { enabled ->
+            preferences.enabled.collect { _ ->
                 updateForegroundService()
             }
         }
         scope.launch {
-            preferences.foregroundServiceEnabled.collect { enabled ->
+            preferences.foregroundServiceEnabled.collect { _ ->
                 updateForegroundService()
             }
         }

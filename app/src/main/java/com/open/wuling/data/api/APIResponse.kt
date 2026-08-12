@@ -12,7 +12,7 @@ data class APIResponse<T>(
     @SerializedName("message") val message: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 // ============== Car Status Response ==============
@@ -25,7 +25,7 @@ data class CarStatusResponse(
     @SerializedName("message") val message: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 data class CarStatusData(
@@ -264,7 +264,7 @@ data class CheckStatusResponse(
     @SerializedName("errorMessage") val errorMessage: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 data class CheckStatusData(
@@ -283,7 +283,7 @@ data class AuthorizeResponse(
     @SerializedName("errorMessage") val errorMessage: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 data class AuthorizeData(
@@ -300,7 +300,7 @@ data class SearchCarResponse(
     @SerializedName("errorMessage") val errorMessage: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 data class SearchCarData(
@@ -322,7 +322,7 @@ data class WindowControlResponse(
     @SerializedName("errorMessage") val errorMessage: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 data class WindowControlData(
@@ -339,7 +339,7 @@ data class BleKeyResponse(
     @SerializedName("errorMessage") val errorMessage: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 data class BleKeyData(
@@ -365,7 +365,7 @@ data class MqttAuthApiResponse(
     @SerializedName("message") val message: String? = null
 ) {
     val isSuccess: Boolean
-        get() = success == true || result == true || errorCode == "0" || errorCode == null
+        get() = success == true || result == true || errorCode == "0"
 }
 
 data class MqttAuthData(

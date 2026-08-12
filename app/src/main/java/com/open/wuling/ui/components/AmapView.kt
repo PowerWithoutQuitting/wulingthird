@@ -43,6 +43,7 @@ fun AmapView(
 
     // 加载状态
     var isLoading by remember { mutableStateOf(true) }
+    var webViewDestroyed by remember { mutableStateOf(false) }
 
     val webView = remember {
         WebView(context).apply {
@@ -88,7 +89,12 @@ fun AmapView(
             when (event) {
                 Lifecycle.Event.ON_RESUME -> webView.onResume()
                 Lifecycle.Event.ON_PAUSE -> webView.onPause()
-                Lifecycle.Event.ON_DESTROY -> webView.destroy()
+                Lifecycle.Event.ON_DESTROY -> {
+                    if (!webViewDestroyed) {
+                        webViewDestroyed = true
+                        webView.destroy()
+                    }
+                }
                 else -> {}
             }
         }
@@ -96,7 +102,10 @@ fun AmapView(
 
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            webView.destroy()
+            if (!webViewDestroyed) {
+                webViewDestroyed = true
+                webView.destroy()
+            }
         }
     }
 

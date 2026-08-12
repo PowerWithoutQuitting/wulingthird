@@ -601,7 +601,8 @@ class VehicleManager @Inject constructor(
     private suspend fun executeACCommandInternal(
         params: Map<String, String>,
         successMessage: String,
-        errorMessage: String
+        errorMessage: String,
+        command: ControlCommand = ControlCommand.CLIMATE_ON
     ) {
         _isLoading.value = true
         _errorMessage.value = null
@@ -619,7 +620,7 @@ class VehicleManager @Inject constructor(
         val result = vehicleRepository.controlAC(params)
 
         result.onSuccess {
-            updateLocalState(ControlCommand.CLIMATE_ON)
+            updateLocalState(command)
             _commandResult.value = CommandResult(
                 success = true,
                 message = successMessage
@@ -662,10 +663,8 @@ class VehicleManager @Inject constructor(
             } else {
                 "空调已关闭"
             }
-            if (!turnOn) {
-                updateLocalState(ControlCommand.CLIMATE_OFF)
-            }
-            executeACCommandInternal(params, successMsg, "空调控制失败")
+            val command = if (turnOn) ControlCommand.CLIMATE_ON else ControlCommand.CLIMATE_OFF
+            executeACCommandInternal(params, successMsg, "空调控制失败", command)
         }
     }
 
