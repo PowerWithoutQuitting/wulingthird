@@ -1,13 +1,12 @@
 package com.open.wuling.data.api
 
 import android.util.Log
-import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonReader
+import com.google.gson.JsonToken
 import com.google.gson.TypeAdapter
 import com.google.gson.TypeAdapterFactory
 import com.google.gson.reflect.TypeToken
-import com.google.gson.stream.JsonReader
-import com.google.gson.stream.JsonToken
 import com.google.gson.stream.JsonWriter
 import com.open.wuling.BuildConfig
 import com.open.wuling.data.model.CarInfo
@@ -30,6 +29,48 @@ import javax.inject.Inject
 
 private val JSON_MEDIA_TYPE = "application/json; charset=UTF-8".toMediaType()
 
+/**
+ * 自定义 TypeAdapterFactory：
+ * 当数值字段（Int/Long/Double/Float/Short/Byte）遇到空字符串或非法值时，
+ * 不再抛异常，而是按 null 处理，走业务层的 ?: 默认值兜底。
+ */
+private val LENIENT_NUMBER_FACTORY = object : TypeAdapterFactory {
+    private val supportedTypes = setOf(
+        Int::class.java, Int::class.javaObjectType,
+        Long::class.java, Long::class.javaObjectType,
+        Double::class.java, Double::class.javaObjectType,
+        Float::class.java, Float::class.javaObjectType,
+        Short::class.java, Short::class.javaObjectType,
+        Byte::class.java, Byte::class.javaObjectType
+    )
+
+    override fun <T> create(gson: com.google.gson.Gson, type: TypeToken<T>): TypeAdapter<T>? {
+        if (!supportedTypes.contains(type.rawType)) return null
+        val delegate = gson.getDelegateAdapter(this, type)
+        return object : TypeAdapter<T>() {
+            override fun write(out: JsonWriter, value: T?) = delegate.write(out, value)
+            override fun read(reader: JsonReader): T? {
+                val peek = reader.peek()
+                if (peek == JsonToken.NULL) {
+                    reader.nextNull()
+                    return null
+                }
+                if (peek == JsonToken.STRING) {
+                    val str = reader.nextString()
+                    if (str.isEmpty()) return null // 空字符串直接返回 null
+                    return try {
+                        // 尝试将字符串转为数值
+                        delegate.fromJsonTree(gson.toJsonTree(str.toDoubleOrNull() ?: str))
+                    } catch (e: Exception) {
+                        null // 转换失败也返回 null，避免崩溃
+                    }
+                }
+                return delegate.read(reader)
+            }
+        }
+    }
+}
+
 class WulingAPI @Inject constructor() {
     private val TAG = "WulingAPI"
 
@@ -40,6 +81,7 @@ class WulingAPI @Inject constructor() {
         .addInterceptor(createLoggingInterceptor())
         .build()
 
+    // 使用 GsonBuilder 注册容错 Factory
     private val gson = GsonBuilder()
         .registerTypeAdapterFactory(LENIENT_NUMBER_FACTORY)
         .create()
@@ -102,10 +144,6 @@ class WulingAPI @Inject constructor() {
 
     /**
      * 带重试的网络请求执行器（使用指数退避策略）
-     * @param maxRetries 最大重试次数（不含首次请求）
-     * @param baseDelayMs 初始重试间隔毫秒
-     * @param maxDelayMs 最大重试间隔毫秒
-     * @param block 实际请求逻辑
      */
     private suspend fun <T> executeWithRetry(
         maxRetries: Int = 2,
@@ -122,7 +160,6 @@ class WulingAPI @Inject constructor() {
             if (result.isSuccess) return result
             lastError = result.exceptionOrNull()
             if (attempt < maxRetries) {
-                // 指数退避：baseDelay * 2^attempt，最大不超过 maxDelayMs
                 val delayMs = minOf(baseDelayMs * (1 shl attempt), maxDelayMs)
                 Log.d(TAG, "等待 ${delayMs}ms 后重试...")
                 delay(delayMs)
@@ -172,7 +209,8 @@ class WulingAPI @Inject constructor() {
                             }
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "queryDefaultCarStatus 响应解析失败, body=$body", e)
+                        // 修复：打印原始响应体，方便定位问题字段
+                        Log.e(TAG, "解析错误，响应体: $body", e)
                         Result.failure(APIError("解析错误: " + e.message))
                     }
                 } else {
@@ -474,7 +512,6 @@ class WulingAPI @Inject constructor() {
 
     /**
      * 查询昨日里程
-     * 独立接口，因为 queryDefaultCarStatus 的 yesterMileage 字段经常返回 0
      */
     suspend fun fetchYesterdayMileage(vin: String): Result<APIResponse<YesterdayMileageData>> = withContext(Dispatchers.IO) {
         if (!APIConfig.isConfigured) {
@@ -550,50 +587,6 @@ class WulingAPI @Inject constructor() {
         }
     }
 
-    private companion object {
-        /**
-         * 五菱服务端在车辆未上报数据时会把数值字段返回为空字符串（如 "interiorTemperature": ""），
-         * Gson 默认解析 "" 到 Int/Long/Double 会抛 NumberFormatException 导致整个状态刷新失败，
-         * 这里把空字符串及非法数值统一按 null 处理（各字段已有 ?: 默认值兜底）。
-         */
-        val LENIENT_NUMBER_FACTORY = object : TypeAdapterFactory {
-            override fun <T : Any> create(gson: Gson, type: TypeToken<T>): TypeAdapter<T>? {
-                val raw = type.rawType
-                if (raw != Int::class.javaObjectType && raw != Long::class.javaObjectType &&
-                    raw != Double::class.javaObjectType && raw != Float::class.javaObjectType &&
-                    raw != Short::class.javaObjectType && raw != Byte::class.javaObjectType
-                ) {
-                    return null
-                }
-                val delegate = gson.getDelegateAdapter(this, type)
-                return object : TypeAdapter<T>() {
-                    override fun write(out: JsonWriter, value: T?) {
-                        delegate.write(out, value)
-                    }
-
-                    @Suppress("UNCHECKED_CAST")
-                    override fun read(reader: JsonReader): T? {
-                        if (reader.peek() != JsonToken.STRING) return delegate.read(reader)
-                        val s = reader.nextString().trim()
-                        if (s.isEmpty()) return null
-                        return try {
-                            when (raw) {
-                                Int::class.javaObjectType -> s.toInt()
-                                Long::class.javaObjectType -> s.toLong()
-                                Double::class.javaObjectType -> s.toDouble()
-                                Float::class.javaObjectType -> s.toFloat()
-                                Short::class.javaObjectType -> s.toShort()
-                                else -> s.toByte()
-                            } as T
-                        } catch (e: NumberFormatException) {
-                            null
-                        }
-                    }
-                }
-            }
-        }
-    }
-
 }
 
 // Extension to convert API response to VehicleStatus
@@ -604,12 +597,6 @@ fun CarStatusApi.toVehicleStatus(
     checkAbsio: Int? = null,
     checkPwrStrIo: Int? = null
 ): VehicleStatus {
-    // 门锁状态判断逻辑（已确认值含义）：
-    // doorLockStatus: 0=锁定, 1=解锁（可能是中控锁状态，可能不同步）
-    // doorXLockStatus: 0=锁定, 1=解锁
-    // 优先用单独门锁状态判断，只有当所有单独门锁都无效(null)时才用 doorLockStatus
-    
-    // 检查各单独门锁是否都有值
     // 直接使用 doorLockStatus 判断整车锁定状态（0=锁定，1=解锁）
     val isVehicleLocked = doorLockStatus == 0
     
@@ -619,7 +606,7 @@ fun CarStatusApi.toVehicleStatus(
         range = leftMileage ?: 0,
         electricRange = leftMileage ?: 0,
         oilRange = oilLeftMileage ?: 0,
-        leftFuel = leftFuel?.toIntOrNull() ?: 0,  // 剩余油量百分比（混动车型）
+        leftFuel = leftFuel?.toIntOrNull() ?: 0,
         isLocked = isVehicleLocked,
         isClimateOn = acStatus != 0 && acStatus != null,
         climateMode = when (acStatus) {
@@ -635,12 +622,12 @@ fun CarStatusApi.toVehicleStatus(
         exteriorTemperature = accCntTemp ?.toInt() ?: 20,
         gearStatus = autoGearStatus ?: "10",
 
-        // 胎压 - 如果API返回的胎压数据为null，则保持默认值0.0，等待单独的胎压API获取
+        // 胎压
         tirePressureFL = tirePressureFl?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureFR = tirePressureFr?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureRL = tirePressureRl?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureRR = tirePressureRr?.toDoubleOrNull()?.div(100) ?: 0.0,
-        tireTemperature = 0,  // 轮胎温度由单独API获取
+        tireTemperature = 0,
 
         // 电池
         batteryHealth = batSOH ?: batHealth ?: 95,
@@ -654,8 +641,7 @@ fun CarStatusApi.toVehicleStatus(
         current = current ?: 0.0,
         chargePower = chargePower?.toDoubleOrNull() ?: 0.0,
 
-        // 车门 — 用 doorXOpenStatus 判断是否打开，用 doorXLockStatus 判断是否锁定
-        // 门锁状态：0=锁定, 1=解锁
+        // 车门
         doors = DoorStatus(
             frontLeft = (door1OpenStatus ?: 0) == 1,
             frontRight = (door2OpenStatus ?: 0) == 1,
@@ -677,7 +663,6 @@ fun CarStatusApi.toVehicleStatus(
             rearRight = (window4Status ?: 0) == 1
         ),
 
-        // 车窗开度
         window1OpenDegree = window1OpenDegree ?: 0,
         window2OpenDegree = window2OpenDegree ?: 0,
         window3OpenDegree = window3OpenDegree ?: 0,
@@ -735,12 +720,9 @@ fun CarStatusApi.toVehicleStatus(
         intelligentCarSwitch = intelligentCarSwitch ?: 0,
         collectTime = collectTime ?: "",
 
-        // ====== 诊断状态 (CheckStatus) ======
-        // ProblemConv(reverse=True): 值被反转 - 0=异常, 1=正常
-        // 例如 enginePow=0 表示"动力系统异常"，enginePow=1 表示"动力系统正常"
+        // 诊断状态
         enginePowStatus = checkEnginePow ?: 1,
         engineTempStatus = checkEngineTemp ?: 1,
-        // absio, pwrStrIo: BinarySensorConv 无反转 - 0=正常, 1=异常
         absStatus = checkAbsio ?: 0,
         powerSteeringStatus = checkPwrStrIo ?: 0
     )
