@@ -2,6 +2,13 @@ package com.open.wuling.data.api
 
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import com.google.gson.TypeAdapter
+import com.google.gson.TypeAdapterFactory
+import com.google.gson.reflect.TypeToken
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonToken
+import com.google.gson.stream.JsonWriter
 import com.open.wuling.BuildConfig
 import com.open.wuling.data.model.CarInfo
 import com.open.wuling.data.model.DoorStatus
@@ -23,9 +30,6 @@ import javax.inject.Inject
 
 private val JSON_MEDIA_TYPE = "application/json; charset=UTF-8".toMediaType()
 
-/** 不可重试的错误（如令牌过期），executeWithRetry 会跳过重试 */
-class NonRetryableError(message: String) : Exception(message)
-
 class WulingAPI @Inject constructor() {
     private val TAG = "WulingAPI"
 
@@ -36,7 +40,9 @@ class WulingAPI @Inject constructor() {
         .addInterceptor(createLoggingInterceptor())
         .build()
 
-    private val gson = Gson()
+    private val gson = GsonBuilder()
+        .registerTypeAdapterFactory(LENIENT_NUMBER_FACTORY)
+        .create()
 
     // 线程安全的请求锁
     private val requestMutex = Mutex()
@@ -115,12 +121,6 @@ class WulingAPI @Inject constructor() {
             val result = block()
             if (result.isSuccess) return result
             lastError = result.exceptionOrNull()
-            // 不可重试的错误（如令牌过期）直接返回，不重试
-            val error = lastError
-            if (error is NonRetryableError) {
-                Log.w(TAG, "不可重试错误，跳过重试: ${error.message}")
-                return result
-            }
             if (attempt < maxRetries) {
                 // 指数退避：baseDelay * 2^attempt，最大不超过 maxDelayMs
                 val delayMs = minOf(baseDelayMs * (1 shl attempt), maxDelayMs)
@@ -149,35 +149,36 @@ class WulingAPI @Inject constructor() {
                     .post("{}".toRequestBody(JSON_MEDIA_TYPE))
                 headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                client.newCall(requestBuilder.build()).execute().use { response ->
-                    val body = response.body?.string()
+                val response = client.newCall(requestBuilder.build()).execute()
+                val body = response.body?.string()
 
-                    if (body != null) {
-                        try {
-                            val carStatusResponse = gson.fromJson(body, CarStatusResponse::class.java)
-                            
-                            if (carStatusResponse.isSuccess) {
-                                if (carStatusResponse.data != null) {
-                                    Result.success(carStatusResponse)
-                                } else {
-                                    Result.failure(APIError("API返回数据为空"))
-                                }
+                val result = if (body != null) {
+                    try {
+                        val carStatusResponse = gson.fromJson(body, CarStatusResponse::class.java)
+                        
+                        if (carStatusResponse.isSuccess) {
+                            if (carStatusResponse.data != null) {
+                                Result.success(carStatusResponse)
                             } else {
-                                val errorMsg = carStatusResponse.errorMessage ?: carStatusResponse.message ?: "请求失败"
-                                val errorCode = carStatusResponse.errorCode ?: "unknown"
-                                
-                                when (errorCode) {
-                                    "500009" -> Result.failure(NonRetryableError("登录已失效，请重新配置 Token"))
-                                    else -> Result.failure(APIError("$errorMsg (错误码: $errorCode)"))
-                                }
+                                Result.failure(APIError("API返回数据为空"))
                             }
-                        } catch (e: Exception) {
-                            Result.failure(APIError("解析错误: " + e.message))
+                        } else {
+                            val errorMsg = carStatusResponse.errorMessage ?: carStatusResponse.message ?: "请求失败"
+                            val errorCode = carStatusResponse.errorCode ?: "unknown"
+                            
+                            when (errorCode) {
+                                "500009" -> Result.failure(APIError("登录已失效，请重新配置 Token"))
+                                else -> Result.failure(APIError("$errorMsg (错误码: $errorCode)"))
+                            }
                         }
-                    } else {
-                        Result.failure(APIError("网络错误：响应体为空"))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "queryDefaultCarStatus 响应解析失败, body=$body", e)
+                        Result.failure(APIError("解析错误: " + e.message))
                     }
+                } else {
+                    Result.failure(APIError("网络错误：响应体为空"))
                 }
+                result
             }
         }
     }
@@ -202,15 +203,14 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            val tireResponse = gson.fromJson(body, TirePressureResponse::class.java)
-                            Result.success(tireResponse)
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        val tireResponse = gson.fromJson(body, TirePressureResponse::class.java)
+                        Result.success(tireResponse)
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -240,15 +240,14 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            val cmdResponse = gson.fromJson(body, CommandResponse::class.java)
-                            Result.success(cmdResponse)
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        val cmdResponse = gson.fromJson(body, CommandResponse::class.java)
+                        Result.success(cmdResponse)
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -281,14 +280,13 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, CommandResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, CommandResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -316,14 +314,13 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, CommandResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, CommandResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -352,14 +349,13 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, CheckStatusResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, CheckStatusResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -388,14 +384,13 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, AuthorizeResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, AuthorizeResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -424,14 +419,13 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, SearchCarResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, SearchCarResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -463,14 +457,13 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, WindowControlResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, WindowControlResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -503,15 +496,14 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            val type = object : com.google.gson.reflect.TypeToken<APIResponse<YesterdayMileageData>>() {}.type
-                            Result.success(gson.fromJson<APIResponse<YesterdayMileageData>>(body, type))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        val type = object : com.google.gson.reflect.TypeToken<APIResponse<YesterdayMileageData>>() {}.type
+                        Result.success(gson.fromJson<APIResponse<YesterdayMileageData>>(body, type))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -543,14 +535,13 @@ class WulingAPI @Inject constructor() {
                         .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, BleKeyResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, BleKeyResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -559,125 +550,45 @@ class WulingAPI @Inject constructor() {
         }
     }
 
-    suspend fun controlTailgate(vin: String, status: Int): Result<CommandResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) {
-            return@withContext Result.failure(APIError("请先配置 Access Token"))
-        }
-
-        executeWithRetry {
-            requestMutex.withLock {
-                try {
-                    val timestamp = System.currentTimeMillis().toString()
-                    val nonce = generateRandomLetters(10)
-                    val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
-
-                    val params = mapOf(
-                        "vin" to vin,
-                        "status" to status.toString()
-                    )
-                    val jsonBody = gson.toJson(params)
-
-                    val requestBuilder = Request.Builder()
-                        .url("${APIConfig.baseURL}/car/control/tailgate")
-                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
-                    headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
-
-                        if (body != null) {
-                            Result.success(gson.fromJson(body, CommandResponse::class.java))
-                        } else {
-                            Result.failure(APIError("网络错误"))
-                        }
-                    }
-                } catch (e: Exception) {
-                    Result.failure(APIError(e.message ?: "网络错误"))
+    private companion object {
+        /**
+         * 五菱服务端在车辆未上报数据时会把数值字段返回为空字符串（如 "interiorTemperature": ""），
+         * Gson 默认解析 "" 到 Int/Long/Double 会抛 NumberFormatException 导致整个状态刷新失败，
+         * 这里把空字符串及非法数值统一按 null 处理（各字段已有 ?: 默认值兜底）。
+         */
+        val LENIENT_NUMBER_FACTORY = object : TypeAdapterFactory {
+            override fun <T : Any> create(gson: Gson, type: TypeToken<T>): TypeAdapter<T>? {
+                val raw = type.rawType
+                if (raw != Int::class.javaObjectType && raw != Long::class.javaObjectType &&
+                    raw != Double::class.javaObjectType && raw != Float::class.javaObjectType &&
+                    raw != Short::class.javaObjectType && raw != Byte::class.javaObjectType
+                ) {
+                    return null
                 }
-            }
-        }
-    }
+                val delegate = gson.getDelegateAdapter(this, type)
+                return object : TypeAdapter<T>() {
+                    override fun write(out: JsonWriter, value: T?) {
+                        delegate.write(out, value)
+                    }
 
-    // ── MQTT 凭据生成（逆向自官方App DEX） ──────────────────
-
-    /**
-     * MD5哈希，返回32位小写十六进制字符串
-     * 逆向自 WulingAPI.access$md5Hex
-     */
-    private fun md5Hex(text: String): String {
-        val md = MessageDigest.getInstance("MD5")
-        val digest = md.digest(text.toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { "%02x".format(it) }
-    }
-
-    /**
-     * 一键获取MQTT连接凭据
-     *
-     * 流程:
-     * 1. POST /base/mqtt/auth {"vin":"xxx","type":3} 获取 token
-     * 2. 本地计算凭据:
-     *    - clientId = vin + "_" + phone.takeLast(4)
-     *    - username = MD5(vin.take(6) + token)
-     *    - password = MD5(clientId.takeLast(6) + token)
-     *
-     * @param vin  车架号
-     * @param phone 绑定手机号（完整号码，取后4位用于clientId）
-     */
-    suspend fun getMqttCredentials(vin: String, phone: String): Result<MqttAuthResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) {
-            return@withContext Result.failure(APIError("请先配置 Access Token"))
-        }
-        if (vin.isEmpty()) {
-            return@withContext Result.failure(APIError("VIN 不能为空"))
-        }
-
-        executeWithRetry {
-            requestMutex.withLock {
-                try {
-                    val timestamp = System.currentTimeMillis().toString()
-                    val nonce = generateRandomLetters(16)
-                    val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
-
-                    // 使用 gson 构建 JSON，避免字符串拼接注入风险
-                    val jsonBody = gson.toJson(mapOf("vin" to vin, "type" to 3))
-                    Log.d(TAG, "MQTT Auth 请求: vin=${vin.take(6)}...")
-
-                    val requestBuilder = Request.Builder()
-                        .url("${APIConfig.baseURL}/base/mqtt/auth")
-                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
-                    headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        val body = response.body?.string()
-
-                        if (body != null) {
-                            val authResponse = gson.fromJson(body, MqttAuthApiResponse::class.java)
-                            if (!authResponse.isSuccess) {
-                                val errorMsg = authResponse.errorMessage ?: authResponse.message ?: "MQTT Auth 失败"
-                                return@withLock Result.failure(NonRetryableError(errorMsg))
-                            }
-
-                            val token = authResponse.data?.token
-                            if (token.isNullOrEmpty()) {
-                                return@withLock Result.failure(APIError("MQTT Auth API 未返回 token"))
-                            }
-
-                            Log.d(TAG, "MQTT Auth 获取 token 成功: ${token.take(8)}...")
-
-                            // 本地计算凭据（逆向自官方App DEX字节码）
-                            val clientId = "${vin}_${phone.takeLast(4)}"
-                            val username = md5Hex("${vin.take(6)}$token")
-                            val password = md5Hex("${clientId.takeLast(6)}$token")
-
-                            Log.d(TAG, "MQTT 凭据生成完成: clientId=$clientId")
-                            Result.success(MqttAuthResponse(username, password, clientId))
-                        } else {
-                            Result.failure(APIError("网络错误：响应体为空"))
+                    @Suppress("UNCHECKED_CAST")
+                    override fun read(reader: JsonReader): T? {
+                        if (reader.peek() != JsonToken.STRING) return delegate.read(reader)
+                        val s = reader.nextString().trim()
+                        if (s.isEmpty()) return null
+                        return try {
+                            when (raw) {
+                                Int::class.javaObjectType -> s.toInt()
+                                Long::class.javaObjectType -> s.toLong()
+                                Double::class.javaObjectType -> s.toDouble()
+                                Float::class.javaObjectType -> s.toFloat()
+                                Short::class.javaObjectType -> s.toShort()
+                                else -> s.toByte()
+                            } as T
+                        } catch (e: NumberFormatException) {
+                            null
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "获取 MQTT 凭据异常: ${e.message}", e)
-                    Result.failure(APIError(e.message ?: "网络错误"))
                 }
             }
         }
