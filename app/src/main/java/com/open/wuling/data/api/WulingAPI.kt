@@ -2,11 +2,11 @@ package com.open.wuling.data.api
 
 import android.util.Log
 import com.google.gson.GsonBuilder
-import com.google.gson.JsonReader
-import com.google.gson.JsonToken
 import com.google.gson.TypeAdapter
 import com.google.gson.TypeAdapterFactory
 import com.google.gson.reflect.TypeToken
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonToken
 import com.google.gson.stream.JsonWriter
 import com.open.wuling.BuildConfig
 import com.open.wuling.data.model.CarInfo
@@ -57,12 +57,11 @@ private val LENIENT_NUMBER_FACTORY = object : TypeAdapterFactory {
                 }
                 if (peek == JsonToken.STRING) {
                     val str = reader.nextString()
-                    if (str.isEmpty()) return null // 空字符串直接返回 null
+                    if (str.isEmpty()) return null
                     return try {
-                        // 尝试将字符串转为数值
                         delegate.fromJsonTree(gson.toJsonTree(str.toDoubleOrNull() ?: str))
                     } catch (e: Exception) {
-                        null // 转换失败也返回 null，避免崩溃
+                        null
                     }
                 }
                 return delegate.read(reader)
@@ -86,7 +85,6 @@ class WulingAPI @Inject constructor() {
         .registerTypeAdapterFactory(LENIENT_NUMBER_FACTORY)
         .create()
 
-    // 线程安全的请求锁
     private val requestMutex = Mutex()
 
     private fun createLoggingInterceptor(): HttpLoggingInterceptor {
@@ -142,9 +140,6 @@ class WulingAPI @Inject constructor() {
         )
     }
 
-    /**
-     * 带重试的网络请求执行器（使用指数退避策略）
-     */
     private suspend fun <T> executeWithRetry(
         maxRetries: Int = 2,
         baseDelayMs: Long = 1000,
@@ -209,7 +204,6 @@ class WulingAPI @Inject constructor() {
                             }
                         }
                     } catch (e: Exception) {
-                        // 修复：打印原始响应体，方便定位问题字段
                         Log.e(TAG, "解析错误，响应体: $body", e)
                         Result.failure(APIError("解析错误: " + e.message))
                     }
@@ -294,7 +288,6 @@ class WulingAPI @Inject constructor() {
         }
     }
 
-    // 直接控制API（与wuling-main项目一致）
     suspend fun controlDoorLock(vin: String, status: Int): Result<CommandResponse> = withContext(Dispatchers.IO) {
         if (!APIConfig.isConfigured) {
             return@withContext Result.failure(APIError("请先配置 Access Token"))
@@ -307,10 +300,7 @@ class WulingAPI @Inject constructor() {
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
 
-                    val params = mapOf(
-                        "vin" to vin,
-                        "status" to status
-                    )
+                    val params = mapOf("vin" to vin, "status" to status)
                     val jsonBody = gson.toJson(params)
 
                     val requestBuilder = Request.Builder()
@@ -484,10 +474,7 @@ class WulingAPI @Inject constructor() {
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
 
-                    val params = mapOf(
-                        "vin" to vin,
-                        "status" to status
-                    )
+                    val params = mapOf("vin" to vin, "status" to status)
                     val jsonBody = gson.toJson(params)
 
                     val requestBuilder = Request.Builder()
@@ -510,9 +497,6 @@ class WulingAPI @Inject constructor() {
         }
     }
 
-    /**
-     * 查询昨日里程
-     */
     suspend fun fetchYesterdayMileage(vin: String): Result<APIResponse<YesterdayMileageData>> = withContext(Dispatchers.IO) {
         if (!APIConfig.isConfigured) {
             return@withContext Result.failure(APIError("请先配置 Access Token"))
@@ -561,10 +545,7 @@ class WulingAPI @Inject constructor() {
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
 
-                    val params = mapOf(
-                        "vin" to vin,
-                        "userId" to userId
-                    )
+                    val params = mapOf("vin" to vin, "userId" to userId)
                     val jsonBody = gson.toJson(params)
 
                     val requestBuilder = Request.Builder()
@@ -586,22 +567,18 @@ class WulingAPI @Inject constructor() {
             }
         }
     }
-
 }
 
 // Extension to convert API response to VehicleStatus
-// 可选参数用于传入诊断状态（来自单独的 checkStatus API）
 fun CarStatusApi.toVehicleStatus(
     checkEnginePow: Int? = null,
     checkEngineTemp: Int? = null,
     checkAbsio: Int? = null,
     checkPwrStrIo: Int? = null
 ): VehicleStatus {
-    // 直接使用 doorLockStatus 判断整车锁定状态（0=锁定，1=解锁）
     val isVehicleLocked = doorLockStatus == 0
     
     val result = VehicleStatus(
-        // 基础
         batteryLevel = batterySoc ?: 0,
         range = leftMileage ?: 0,
         electricRange = leftMileage ?: 0,
@@ -622,14 +599,12 @@ fun CarStatusApi.toVehicleStatus(
         exteriorTemperature = accCntTemp ?.toInt() ?: 20,
         gearStatus = autoGearStatus ?: "10",
 
-        // 胎压
         tirePressureFL = tirePressureFl?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureFR = tirePressureFr?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureRL = tirePressureRl?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureRR = tirePressureRr?.toDoubleOrNull()?.div(100) ?: 0.0,
         tireTemperature = 0,
 
-        // 电池
         batteryHealth = batSOH ?: batHealth ?: 95,
         batteryTempMin = batMinTemp ?: 20,
         batteryTempMax = batMaxTemp ?: 28,
@@ -641,7 +616,6 @@ fun CarStatusApi.toVehicleStatus(
         current = current ?: 0.0,
         chargePower = chargePower?.toDoubleOrNull() ?: 0.0,
 
-        // 车门
         doors = DoorStatus(
             frontLeft = (door1OpenStatus ?: 0) == 1,
             frontRight = (door2OpenStatus ?: 0) == 1,
@@ -655,7 +629,6 @@ fun CarStatusApi.toVehicleStatus(
             trunkLocked = (doorLockStatus ?: 0) == 0
         ),
 
-        // 车窗
         windows = WindowStatus(
             frontLeft = (window1Status ?: 0) == 1,
             frontRight = (window2Status ?: 0) == 1,
@@ -668,7 +641,6 @@ fun CarStatusApi.toVehicleStatus(
         window3OpenDegree = window3OpenDegree ?: 0,
         window4OpenDegree = window4OpenDegree ?: 0,
 
-        // 灯光
         frontFogLight = frontFogLight == "1",
         leftTurnLight = leftTurnLight == "1",
         positionLight = positionLight == "1",
@@ -676,37 +648,30 @@ fun CarStatusApi.toVehicleStatus(
         dipHeadLight = dipHeadLight == "1",
         lowBeamLight = lowBeamLight == "1",
 
-        // 钥匙 & 档位
         keyStatus = keyStatus ?: "0",
         autoGearStatus = autoGearStatus ?: "10",
 
-        // 电机温度
         tmActTemp = tmActTemp ?: 0,
         invActTemp = invActTemp ?: 0,
         obcOtpCur = obcOtpCur ?: 0.0,
 
-        // 充电
         vecChrgStsIndOn = vecChrgStsIndOn == 1,
         vecChargeSts = vecChargeSts ?: 0,
         chargingTimeRemaining = leftChargeTime,
         chargingRaw = charging ?: "0",
 
-        // 里程
         yesterMileage = yesterMileage ?: 0,
         avgFuel = avgFuel ?: 0.0,
         hybridMileageKm = hybridMileage?.toIntOrNull(),
 
-        // 驾驶状态
         steeringWheelAngle = strWhAng ?: "0",
         brakePedalPosition = brakPedalPos ?: "0",
         accPosition = accActPos ?: "0",
         averageSpeed = vehSpdAvgDrvn ?: "",
 
-        // 安全
         sentinelModeStatus = sentinelModeStatus == "1",
         limitFeedback = limitFeedback ?: "-1",
 
-        // 座椅
         seat1HotStatus = seat1HotStatus ?: "",
         seat2HotStatus = seat2HotStatus ?: "",
         seat3HotStatus = seat3HotStatus ?: "",
@@ -716,11 +681,9 @@ fun CarStatusApi.toVehicleStatus(
         seat3WindStatus = seat3WindStatus ?: "",
         seat4WindStatus = seat4WindStatus ?: "",
 
-        // 其他
         intelligentCarSwitch = intelligentCarSwitch ?: 0,
         collectTime = collectTime ?: "",
 
-        // 诊断状态
         enginePowStatus = checkEnginePow ?: 1,
         engineTempStatus = checkEngineTemp ?: 1,
         absStatus = checkAbsio ?: 0,
@@ -729,7 +692,6 @@ fun CarStatusApi.toVehicleStatus(
     return result
 }
 
-// Extension to convert CarInfoApi to CarInfo
 fun CarInfoApi.toCarInfo(): CarInfo {
     return CarInfo(
         carInfoId = carInfoId ?: 0,
