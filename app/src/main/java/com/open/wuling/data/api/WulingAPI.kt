@@ -323,6 +323,45 @@ class WulingAPI @Inject constructor() {
         }
     }
 
+    // ========== 新增：控制尾门 ==========
+    suspend fun controlTailgate(vin: String, status: Int): Result<CommandResponse> = withContext(Dispatchers.IO) {
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
+        executeWithRetry {
+            requestMutex.withLock {
+                try {
+                    val timestamp = System.currentTimeMillis().toString()
+                    val nonce = generateRandomLetters(10)
+                    val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
+                    val params = mapOf(
+                        "vin" to vin,
+                        "status" to status
+                    )
+                    val jsonBody = gson.toJson(params)
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/tailgate")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+                    headers.forEach { (key, value) -> requestBuilder.header(key, value) }
+
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
+
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, CommandResponse::class.java))
+                    } else {
+                        Result.failure(APIError("网络错误"))
+                    }
+                } catch (e: Exception) {
+                    Result.failure(APIError(e.message ?: "网络错误"))
+                }
+            }
+        }
+    }
+
     suspend fun controlAC(params: Map<String, Any>): Result<CommandResponse> = withContext(Dispatchers.IO) {
         if (!APIConfig.isConfigured) {
             return@withContext Result.failure(APIError("请先配置 Access Token"))
@@ -567,166 +606,31 @@ class WulingAPI @Inject constructor() {
             }
         }
     }
-}
 
-// Extension to convert API response to VehicleStatus
-fun CarStatusApi.toVehicleStatus(
-    checkEnginePow: Int? = null,
-    checkEngineTemp: Int? = null,
-    checkAbsio: Int? = null,
-    checkPwrStrIo: Int? = null
-): VehicleStatus {
-    val isVehicleLocked = doorLockStatus == 0
-    
-    val result = VehicleStatus(
-        batteryLevel = batterySoc ?: 0,
-        range = leftMileage ?: 0,
-        electricRange = leftMileage ?: 0,
-        oilRange = oilLeftMileage ?: 0,
-        leftFuel = leftFuel?.toIntOrNull() ?: 0,
-        isLocked = isVehicleLocked,
-        isClimateOn = acStatus != 0 && acStatus != null,
-        climateMode = when (acStatus) {
-            0 -> "off"
-            1 -> "cool"
-            2 -> "heat"
-            else -> "off"
-        },
-        climateTemperature = interiorTemperature ?: 24,
-        mileage = mileage ?: 0,
-        isCharging = vecChrgingSts == 1,
-        interiorTemperature = interiorTemperature ?: 25,
-        exteriorTemperature = accCntTemp ?.toInt() ?: 20,
-        gearStatus = autoGearStatus ?: "10",
+    // ========== 新增：获取 MQTT 凭证 ==========
+    suspend fun getMqttCredentials(vin: String): Result<MqttCredentialsResponse> = withContext(Dispatchers.IO) {
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
 
-        tirePressureFL = tirePressureFl?.toDoubleOrNull()?.div(100) ?: 0.0,
-        tirePressureFR = tirePressureFr?.toDoubleOrNull()?.div(100) ?: 0.0,
-        tirePressureRL = tirePressureRl?.toDoubleOrNull()?.div(100) ?: 0.0,
-        tirePressureRR = tirePressureRr?.toDoubleOrNull()?.div(100) ?: 0.0,
-        tireTemperature = 0,
+        executeWithRetry {
+            requestMutex.withLock {
+                try {
+                    val timestamp = System.currentTimeMillis().toString()
+                    val nonce = generateRandomLetters(10)
+                    val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
 
-        batteryHealth = batSOH ?: batHealth ?: 95,
-        batteryTempMin = batMinTemp ?: 20,
-        batteryTempMax = batMaxTemp ?: 28,
-        batAvgTemp = batAvgTemp ?: 0,
-        lowBatVol = lowBatVol ?: 0.0,
-        batteryStatus = batteryStatus ?: "0",
-        leftBatteryPower = leftBatteryPower ?: 0.0,
-        voltage = voltage ?: 0.0,
-        current = current ?: 0.0,
-        chargePower = chargePower?.toDoubleOrNull() ?: 0.0,
+                    val params = mapOf("vin" to vin)
+                    val jsonBody = gson.toJson(params)
 
-        doors = DoorStatus(
-            frontLeft = (door1OpenStatus ?: 0) == 1,
-            frontRight = (door2OpenStatus ?: 0) == 1,
-            rearLeft = (door3OpenStatus ?: 0) == 1,
-            rearRight = (door4OpenStatus ?: 0) == 1,
-            trunk = (tailDoorOpenStatus ?: 0) == 1,
-            frontLeftLocked = (door1LockStatus ?: doorLockStatus ?: 0) == 0,
-            frontRightLocked = (door2LockStatus ?: doorLockStatus ?: 0) == 0,
-            rearLeftLocked = (door3LockStatus ?: doorLockStatus ?: 0) == 0,
-            rearRightLocked = (door4LockStatus ?: doorLockStatus ?: 0) == 0,
-            trunkLocked = (doorLockStatus ?: 0) == 0
-        ),
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/mqtt/credentials")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+                    headers.forEach { (key, value) -> requestBuilder.header(key, value) }
 
-        windows = WindowStatus(
-            frontLeft = (window1Status ?: 0) == 1,
-            frontRight = (window2Status ?: 0) == 1,
-            rearLeft = (window3Status ?: 0) == 1,
-            rearRight = (window4Status ?: 0) == 1
-        ),
+                    val response = client.newCall(requestBuilder.build()).execute()
+                    val body = response.body?.string()
 
-        window1OpenDegree = window1OpenDegree ?: 0,
-        window2OpenDegree = window2OpenDegree ?: 0,
-        window3OpenDegree = window3OpenDegree ?: 0,
-        window4OpenDegree = window4OpenDegree ?: 0,
-
-        frontFogLight = frontFogLight == "1",
-        leftTurnLight = leftTurnLight == "1",
-        positionLight = positionLight == "1",
-        rightTurnLight = rightTurnLight == "1",
-        dipHeadLight = dipHeadLight == "1",
-        lowBeamLight = lowBeamLight == "1",
-
-        keyStatus = keyStatus ?: "0",
-        autoGearStatus = autoGearStatus ?: "10",
-
-        tmActTemp = tmActTemp ?: 0,
-        invActTemp = invActTemp ?: 0,
-        obcOtpCur = obcOtpCur ?: 0.0,
-
-        vecChrgStsIndOn = vecChrgStsIndOn == 1,
-        vecChargeSts = vecChargeSts ?: 0,
-        chargingTimeRemaining = leftChargeTime,
-        chargingRaw = charging ?: "0",
-
-        yesterMileage = yesterMileage ?: 0,
-        avgFuel = avgFuel ?: 0.0,
-        hybridMileageKm = hybridMileage?.toIntOrNull(),
-
-        steeringWheelAngle = strWhAng ?: "0",
-        brakePedalPosition = brakPedalPos ?: "0",
-        accPosition = accActPos ?: "0",
-        averageSpeed = vehSpdAvgDrvn ?: "",
-
-        sentinelModeStatus = sentinelModeStatus == "1",
-        limitFeedback = limitFeedback ?: "-1",
-
-        seat1HotStatus = seat1HotStatus ?: "",
-        seat2HotStatus = seat2HotStatus ?: "",
-        seat3HotStatus = seat3HotStatus ?: "",
-        seat4HotStatus = seat4HotStatus ?: "",
-        seat1WindStatus = seat1WindStatus ?: "",
-        seat2WindStatus = seat2WindStatus ?: "",
-        seat3WindStatus = seat3WindStatus ?: "",
-        seat4WindStatus = seat4WindStatus ?: "",
-
-        intelligentCarSwitch = intelligentCarSwitch ?: 0,
-        collectTime = collectTime ?: "",
-
-        enginePowStatus = checkEnginePow ?: 1,
-        engineTempStatus = checkEngineTemp ?: 1,
-        absStatus = checkAbsio ?: 0,
-        powerSteeringStatus = checkPwrStrIo ?: 0
-    )
-    return result
-}
-
-fun CarInfoApi.toCarInfo(): CarInfo {
-    return CarInfo(
-        carInfoId = carInfoId ?: 0,
-        userId = userId ?: "",
-        vin = vin ?: "",
-        carName = carName ?: "",
-        colorCode = colorCode ?: "",
-        colorName = colorName ?: "",
-        vsn = vsn ?: "",
-        carPlate = carPlate ?: "",
-        carTypeName = carTypeName ?: "",
-        model = model ?: "",
-        level = level ?: "",
-        engineType = engineType ?: 0,
-        image = image ?: "",
-        providerCode = providerCode ?: "",
-        carYear = carYear ?: "",
-        seriesCode = seriesCode ?: "",
-        powerType = powerType ?: "",
-        purchaseDate = purchaseDate ?: 0,
-        purchaseUserName = purchaseUserName ?: "",
-        purchaseShopNum = purchaseShopNum ?: "",
-        carOwnerDay = carOwnerDay ?: 0,
-        bindCarUserMobile = bindCarUserMobile ?: "",
-        finishBind = finishBind ?: false,
-        shakeLock = shakeLock ?: 0,
-        bluetoothKeyConnectMark = bluetoothKeyConnectMark ?: "",
-        supportAutoAir = supportAutoAir ?: 0,
-        supportChargeRemain = supportChargeRemain ?: 0,
-        supportChargePower = supportChargePower ?: 0,
-        supportAvgFuel = supportAvgFuel ?: 0,
-        supportHybridMileage = supportHybridMileage ?: 0,
-        supportMqtt = supportMqtt ?: 0,
-        controlView = controlView ?: 0,
-        bleType = bleType ?: 0,
-        physicsEngine = physicsEngine ?: 0
-    )
-}
+                    if (body != null) {
+                        Result.success(gson.fromJson(body, MqttCredentialsResponse::class.java))
+                    } else {
