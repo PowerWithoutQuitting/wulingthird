@@ -1,6 +1,7 @@
 package com.open.wuling.data.api
 
 import android.util.Log
+import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.TypeAdapter
 import com.google.gson.TypeAdapterFactory
@@ -29,41 +30,8 @@ import javax.inject.Inject
 
 private val JSON_MEDIA_TYPE = "application/json; charset=UTF-8".toMediaType()
 
-private val LENIENT_NUMBER_FACTORY = object : TypeAdapterFactory {
-    private val supportedTypes = setOf(
-        Int::class.java, Int::class.javaObjectType,
-        Long::class.java, Long::class.javaObjectType,
-        Double::class.java, Double::class.javaObjectType,
-        Float::class.java, Float::class.javaObjectType,
-        Short::class.java, Short::class.javaObjectType,
-        Byte::class.java, Byte::class.javaObjectType
-    )
-
-    override fun <T> create(gson: com.google.gson.Gson, type: TypeToken<T>): TypeAdapter<T>? {
-        if (!supportedTypes.contains(type.rawType)) return null
-        val delegate = gson.getDelegateAdapter(this, type)
-        return object : TypeAdapter<T>() {
-            override fun write(out: JsonWriter, value: T?) = delegate.write(out, value)
-            override fun read(reader: JsonReader): T? {
-                val peek = reader.peek()
-                if (peek == JsonToken.NULL) {
-                    reader.nextNull()
-                    return null
-                }
-                if (peek == JsonToken.STRING) {
-                    val str = reader.nextString()
-                    if (str.isEmpty()) return null
-                    return try {
-                        delegate.fromJsonTree(gson.toJsonTree(str.toDoubleOrNull() ?: str))
-                    } catch (e: Exception) {
-                        null
-                    }
-                }
-                return delegate.read(reader)
-            }
-        }
-    }
-}
+/** 不可重试的错误（如令牌过期），executeWithRetry 会跳过重试 */
+class NonRetryableError(message: String) : Exception(message)
 
 class WulingAPI @Inject constructor() {
     private val TAG = "WulingAPI"
@@ -79,6 +47,7 @@ class WulingAPI @Inject constructor() {
         .registerTypeAdapterFactory(LENIENT_NUMBER_FACTORY)
         .create()
 
+    // 线程安全的请求锁
     private val requestMutex = Mutex()
 
     private fun createLoggingInterceptor(): HttpLoggingInterceptor {
@@ -94,6 +63,7 @@ class WulingAPI @Inject constructor() {
     private fun generateSignature(accessToken: String, timestamp: String, nonce: String): String {
         val signStr = accessToken + timestamp + nonce + APIConfig.clientId + APIConfig.clientSecret +
                 APIConfig.appCode + APIConfig.appVersion + APIConfig.system + APIConfig.systemVersion
+
         val md = MessageDigest.getInstance("SHA-256")
         val digest = md.digest(signStr.toByteArray())
         return digest.joinToString("") { "%02x".format(it) }
@@ -133,6 +103,13 @@ class WulingAPI @Inject constructor() {
         )
     }
 
+    /**
+     * 带重试的网络请求执行器（使用指数退避策略）
+     * @param maxRetries 最大重试次数（不含首次请求）
+     * @param baseDelayMs 初始重试间隔毫秒
+     * @param maxDelayMs 最大重试间隔毫秒
+     * @param block 实际请求逻辑
+     */
     private suspend fun <T> executeWithRetry(
         maxRetries: Int = 2,
         baseDelayMs: Long = 1000,
@@ -147,7 +124,14 @@ class WulingAPI @Inject constructor() {
             val result = block()
             if (result.isSuccess) return result
             lastError = result.exceptionOrNull()
+            // 不可重试的错误（如令牌过期）直接返回，不重试
+            val error = lastError
+            if (error is NonRetryableError) {
+                Log.w(TAG, "不可重试错误，跳过重试: ${error.message}")
+                return result
+            }
             if (attempt < maxRetries) {
+                // 指数退避：baseDelay * 2^attempt，最大不超过 maxDelayMs
                 val delayMs = minOf(baseDelayMs * (1 shl attempt), maxDelayMs)
                 Log.d(TAG, "等待 ${delayMs}ms 后重试...")
                 delay(delayMs)
@@ -161,62 +145,82 @@ class WulingAPI @Inject constructor() {
         if (!APIConfig.isConfigured) {
             return@withContext Result.failure(APIError("请先配置 Access Token"))
         }
+
         executeWithRetry {
             requestMutex.withLock {
                 val timestamp = System.currentTimeMillis().toString()
                 val nonce = generateRandomLetters(10)
                 val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                 val url = "${APIConfig.baseURL}/userCarRelation/queryDefaultCarStatus"
-                val requestBuilder = Request.Builder().url(url).post("{}".toRequestBody(JSON_MEDIA_TYPE))
+                val requestBuilder = Request.Builder()
+                    .url(url)
+                    .post("{}".toRequestBody(JSON_MEDIA_TYPE))
                 headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                val response = client.newCall(requestBuilder.build()).execute()
-                val body = response.body?.string()
-                if (body != null) {
-                    try {
-                        val carStatusResponse = gson.fromJson(body, CarStatusResponse::class.java)
-                        if (carStatusResponse.isSuccess) {
-                            if (carStatusResponse.data != null) {
-                                Result.success(carStatusResponse)
+
+                client.newCall(requestBuilder.build()).execute().use { response ->
+                    val body = response.body?.string()
+
+                    if (body != null) {
+                        try {
+                            val carStatusResponse = gson.fromJson(body, CarStatusResponse::class.java)
+                            
+                            if (carStatusResponse.isSuccess) {
+                                if (carStatusResponse.data != null) {
+                                    Result.success(carStatusResponse)
+                                } else {
+                                    Result.failure(APIError("API返回数据为空"))
+                                }
                             } else {
-                                Result.failure(APIError("API返回数据为空"))
+                                val errorMsg = carStatusResponse.errorMessage ?: carStatusResponse.message ?: "请求失败"
+                                val errorCode = carStatusResponse.errorCode ?: "unknown"
+                                
+                                when (errorCode) {
+                                    "500009" -> Result.failure(NonRetryableError("登录已失效，请重新配置 Token"))
+                                    else -> Result.failure(APIError("$errorMsg (错误码: $errorCode)"))
+                                }
                             }
-                        } else {
-                            val errorMsg = carStatusResponse.errorMessage ?: carStatusResponse.message ?: "请求失败"
-                            val errorCode = carStatusResponse.errorCode ?: "unknown"
-                            when (errorCode) {
-                                "500009" -> Result.failure(APIError("登录已失效，请重新配置 Token"))
-                                else -> Result.failure(APIError("$errorMsg (错误码: $errorCode)"))
-                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "queryDefaultCarStatus 响应解析失败, body=$body", e)
+                            Result.failure(APIError("解析错误: " + e.message))
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "解析错误，响应体: $body", e)
-                        Result.failure(APIError("解析错误: " + e.message))
+                    } else {
+                        Result.failure(APIError("网络错误：响应体为空"))
                     }
-                } else {
-                    Result.failure(APIError("网络错误：响应体为空"))
                 }
             }
         }
     }
 
     suspend fun queryTirePressure(vin: String): Result<TirePressureResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                     val params = mapOf("vin" to vin)
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/info/tire/pressure").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/info/tire/pressure")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, TirePressureResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            val tireResponse = gson.fromJson(body, TirePressureResponse::class.java)
+                            Result.success(tireResponse)
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -226,24 +230,35 @@ class WulingAPI @Inject constructor() {
     }
 
     suspend fun sendCommand(command: String, params: Map<String, Any> = emptyMap()): Result<CommandResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                     val allParams = params.toMutableMap()
                     allParams["command"] = command
                     val jsonBody = gson.toJson(allParams)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/remote/control").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/remote/control")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, CommandResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            val cmdResponse = gson.fromJson(body, CommandResponse::class.java)
+                            Result.success(cmdResponse)
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -252,50 +267,38 @@ class WulingAPI @Inject constructor() {
         }
     }
 
+    // 直接控制API（与wuling-main项目一致）
     suspend fun controlDoorLock(vin: String, status: Int): Result<CommandResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
-        executeWithRetry {
-            requestMutex.withLock {
-                try {
-                    val timestamp = System.currentTimeMillis().toString()
-                    val nonce = generateRandomLetters(10)
-                    val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
-                    val params = mapOf("vin" to vin, "status" to status)
-                    val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/control/doorLock").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
-                    headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, CommandResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
-                    }
-                } catch (e: Exception) {
-                    Result.failure(APIError(e.message ?: "网络错误"))
-                }
-            }
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
         }
-    }
 
-    suspend fun controlTailgate(vin: String, status: Int): Result<CommandResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
-                    val params = mapOf("vin" to vin, "status" to status)
+
+                    val params = mapOf(
+                        "vin" to vin,
+                        "status" to status
+                    )
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/control/tailgate").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/doorLock")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, CommandResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, CommandResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -305,22 +308,32 @@ class WulingAPI @Inject constructor() {
     }
 
     suspend fun controlAC(params: Map<String, Any>): Result<CommandResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/control/acc").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/acc")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, CommandResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, CommandResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -330,23 +343,33 @@ class WulingAPI @Inject constructor() {
     }
 
     suspend fun checkCarStatus(vin: String): Result<CheckStatusResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                     val params = mapOf("vin" to vin)
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/check/all").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/check/all")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, CheckStatusResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, CheckStatusResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -356,23 +379,33 @@ class WulingAPI @Inject constructor() {
     }
 
     suspend fun authorizeIgnition(vin: String): Result<AuthorizeResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                     val params = mapOf("vin" to vin)
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/control/ignition/authorize").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/ignition/authorize")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, AuthorizeResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, AuthorizeResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -382,23 +415,33 @@ class WulingAPI @Inject constructor() {
     }
 
     suspend fun searchCar(vin: String): Result<SearchCarResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                     val params = mapOf("vin" to vin)
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/control/searchCar").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/searchCar")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, SearchCarResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, SearchCarResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -408,23 +451,36 @@ class WulingAPI @Inject constructor() {
     }
 
     suspend fun controlWindow(vin: String, status: Int): Result<WindowControlResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
-                    val params = mapOf("vin" to vin, "status" to status)
+
+                    val params = mapOf(
+                        "vin" to vin,
+                        "status" to status
+                    )
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/control/window").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/window")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, WindowControlResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, WindowControlResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -433,25 +489,39 @@ class WulingAPI @Inject constructor() {
         }
     }
 
+    /**
+     * 查询昨日里程
+     * 独立接口，因为 queryDefaultCarStatus 的 yesterMileage 字段经常返回 0
+     */
     suspend fun fetchYesterdayMileage(vin: String): Result<APIResponse<YesterdayMileageData>> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
                     val params = mapOf("vin" to vin)
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/yesterday/mileage").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/yesterday/mileage")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        val type = object : com.google.gson.reflect.TypeToken<APIResponse<YesterdayMileageData>>() {}.type
-                        Result.success(gson.fromJson<APIResponse<YesterdayMileageData>>(body, type))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            val type = object : com.google.gson.reflect.TypeToken<APIResponse<YesterdayMileageData>>() {}.type
+                            Result.success(gson.fromJson<APIResponse<YesterdayMileageData>>(body, type))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -461,23 +531,36 @@ class WulingAPI @Inject constructor() {
     }
 
     suspend fun queryBleKey(vin: String, userId: String): Result<BleKeyResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
-                    val params = mapOf("vin" to vin, "userId" to userId)
+
+                    val params = mapOf(
+                        "vin" to vin,
+                        "userId" to userId
+                    )
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/car/control/ble/key/query").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/ble/key/query")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, BleKeyResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, BleKeyResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -486,24 +569,37 @@ class WulingAPI @Inject constructor() {
         }
     }
 
-    suspend fun getMqttCredentials(vin: String): Result<MqttCredentialsResponse> = withContext(Dispatchers.IO) {
-        if (!APIConfig.isConfigured) return@withContext Result.failure(APIError("请先配置 Access Token"))
+    suspend fun controlTailgate(vin: String, status: Int): Result<CommandResponse> = withContext(Dispatchers.IO) {
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+
         executeWithRetry {
             requestMutex.withLock {
                 try {
                     val timestamp = System.currentTimeMillis().toString()
                     val nonce = generateRandomLetters(10)
                     val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
-                    val params = mapOf("vin" to vin)
+
+                    val params = mapOf(
+                        "vin" to vin,
+                        "status" to status.toString()
+                    )
                     val jsonBody = gson.toJson(params)
-                    val requestBuilder = Request.Builder().url("${APIConfig.baseURL}/mqtt/credentials").post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/car/control/tailgate")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                     headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-                    val response = client.newCall(requestBuilder.build()).execute()
-                    val body = response.body?.string()
-                    if (body != null) {
-                        Result.success(gson.fromJson(body, MqttCredentialsResponse::class.java))
-                    } else {
-                        Result.failure(APIError("网络错误"))
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            Result.success(gson.fromJson(body, CommandResponse::class.java))
+                        } else {
+                            Result.failure(APIError("网络错误"))
+                        }
                     }
                 } catch (e: Exception) {
                     Result.failure(APIError(e.message ?: "网络错误"))
@@ -511,42 +607,162 @@ class WulingAPI @Inject constructor() {
             }
         }
     }
+
+    // ── MQTT 凭据生成（逆向自官方App DEX） ──────────────────
+
+    /**
+     * MD5哈希，返回32位小写十六进制字符串
+     * 逆向自 WulingAPI.access$md5Hex
+     */
+    private fun md5Hex(text: String): String {
+        val md = MessageDigest.getInstance("MD5")
+        val digest = md.digest(text.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * 一键获取MQTT连接凭据
+     *
+     * 流程:
+     * 1. POST /base/mqtt/auth {"vin":"xxx","type":3} 获取 token
+     * 2. 本地计算凭据:
+     *    - clientId = vin + "_" + phone.takeLast(4)
+     *    - username = MD5(vin.take(6) + token)
+     *    - password = MD5(clientId.takeLast(6) + token)
+     *
+     * @param vin  车架号
+     * @param phone 绑定手机号（完整号码，取后4位用于clientId）
+     */
+    suspend fun getMqttCredentials(vin: String, phone: String): Result<MqttAuthResponse> = withContext(Dispatchers.IO) {
+        if (!APIConfig.isConfigured) {
+            return@withContext Result.failure(APIError("请先配置 Access Token"))
+        }
+        if (vin.isEmpty()) {
+            return@withContext Result.failure(APIError("VIN 不能为空"))
+        }
+
+        executeWithRetry {
+            requestMutex.withLock {
+                try {
+                    val timestamp = System.currentTimeMillis().toString()
+                    val nonce = generateRandomLetters(16)
+                    val headers = buildCommonHeaders(APIConfig.accessToken, timestamp, nonce)
+
+                    // 使用 gson 构建 JSON，避免字符串拼接注入风险
+                    val jsonBody = gson.toJson(mapOf("vin" to vin, "type" to 3))
+                    Log.d(TAG, "MQTT Auth 请求: vin=${vin.take(6)}...")
+
+                    val requestBuilder = Request.Builder()
+                        .url("${APIConfig.baseURL}/base/mqtt/auth")
+                        .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+                    headers.forEach { (key, value) -> requestBuilder.header(key, value) }
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val body = response.body?.string()
+
+                        if (body != null) {
+                            val authResponse = gson.fromJson(body, MqttAuthApiResponse::class.java)
+                            if (!authResponse.isSuccess) {
+                                val errorMsg = authResponse.errorMessage ?: authResponse.message ?: "MQTT Auth 失败"
+                                return@withLock Result.failure(NonRetryableError(errorMsg))
+                            }
+
+                            val token = authResponse.data?.token
+                            if (token.isNullOrEmpty()) {
+                                return@withLock Result.failure(APIError("MQTT Auth API 未返回 token"))
+                            }
+
+                            Log.d(TAG, "MQTT Auth 获取 token 成功: ${token.take(8)}...")
+
+                            // 本地计算凭据（逆向自官方App DEX字节码）
+                            val clientId = "${vin}_${phone.takeLast(4)}"
+                            val username = md5Hex("${vin.take(6)}$token")
+                            val password = md5Hex("${clientId.takeLast(6)}$token")
+
+                            Log.d(TAG, "MQTT 凭据生成完成: clientId=$clientId")
+                            Result.success(MqttAuthResponse(username, password, clientId))
+                        } else {
+                            Result.failure(APIError("网络错误：响应体为空"))
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "获取 MQTT 凭据异常: ${e.message}", e)
+                    Result.failure(APIError(e.message ?: "网络错误"))
+                }
+            }
+        }
+    }
+
+    private companion object {
+        /**
+         * 五菱服务端在车辆未上报数据时会把数值字段返回为空字符串（如 "interiorTemperature": ""），
+         * Gson 默认解析 "" 到 Int/Long/Double 会抛 NumberFormatException 导致整个状态刷新失败，
+         * 这里把空字符串及非法数值统一按 null 处理（各字段已有 ?: 默认值兜底）。
+         */
+        val LENIENT_NUMBER_FACTORY = object : TypeAdapterFactory {
+            override fun <T : Any> create(gson: Gson, type: TypeToken<T>): TypeAdapter<T>? {
+                val raw = type.rawType
+                if (raw != Int::class.javaObjectType && raw != Long::class.javaObjectType &&
+                    raw != Double::class.javaObjectType && raw != Float::class.javaObjectType &&
+                    raw != Short::class.javaObjectType && raw != Byte::class.javaObjectType
+                ) {
+                    return null
+                }
+                val delegate = gson.getDelegateAdapter(this, type)
+                return object : TypeAdapter<T>() {
+                    override fun write(out: JsonWriter, value: T?) {
+                        delegate.write(out, value)
+                    }
+
+                    @Suppress("UNCHECKED_CAST")
+                    override fun read(reader: JsonReader): T? {
+                        if (reader.peek() != JsonToken.STRING) return delegate.read(reader)
+                        val s = reader.nextString().trim()
+                        if (s.isEmpty()) return null
+                        return try {
+                            when (raw) {
+                                Int::class.javaObjectType -> s.toInt()
+                                Long::class.javaObjectType -> s.toLong()
+                                Double::class.javaObjectType -> s.toDouble()
+                                Float::class.javaObjectType -> s.toFloat()
+                                Short::class.javaObjectType -> s.toShort()
+                                else -> s.toByte()
+                            } as T
+                        } catch (e: NumberFormatException) {
+                            null
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }
 
-// ========== 响应数据类 ==========
-
-data class MqttCredentialsResponse(
-    val code: String? = null,
-    val message: String? = null,
-    val data: MqttCredentialsData? = null
-) {
-    val isSuccess: Boolean get() = code == "0" || code == "200"
-}
-
-data class MqttCredentialsData(
-    val host: String? = null,
-    val port: Int? = null,
-    val username: String? = null,
-    val password: String? = null,
-    val clientId: String? = null,
-    val topic: String? = null
-)
-
-// ========== 扩展函数 ==========
-
+// Extension to convert API response to VehicleStatus
+// 可选参数用于传入诊断状态（来自单独的 checkStatus API）
 fun CarStatusApi.toVehicleStatus(
     checkEnginePow: Int? = null,
     checkEngineTemp: Int? = null,
     checkAbsio: Int? = null,
     checkPwrStrIo: Int? = null
 ): VehicleStatus {
+    // 门锁状态判断逻辑（已确认值含义）：
+    // doorLockStatus: 0=锁定, 1=解锁（可能是中控锁状态，可能不同步）
+    // doorXLockStatus: 0=锁定, 1=解锁
+    // 优先用单独门锁状态判断，只有当所有单独门锁都无效(null)时才用 doorLockStatus
+    
+    // 检查各单独门锁是否都有值
+    // 直接使用 doorLockStatus 判断整车锁定状态（0=锁定，1=解锁）
     val isVehicleLocked = doorLockStatus == 0
-    return VehicleStatus(
+    
+    val result = VehicleStatus(
+        // 基础
         batteryLevel = batterySoc ?: 0,
         range = leftMileage ?: 0,
         electricRange = leftMileage ?: 0,
         oilRange = oilLeftMileage ?: 0,
-        leftFuel = leftFuel?.toIntOrNull() ?: 0,
+        leftFuel = leftFuel?.toIntOrNull() ?: 0,  // 剩余油量百分比（混动车型）
         isLocked = isVehicleLocked,
         isClimateOn = acStatus != 0 && acStatus != null,
         climateMode = when (acStatus) {
@@ -559,13 +775,17 @@ fun CarStatusApi.toVehicleStatus(
         mileage = mileage ?: 0,
         isCharging = vecChrgingSts == 1,
         interiorTemperature = interiorTemperature ?: 25,
-        exteriorTemperature = accCntTemp?.toInt() ?: 20,
+        exteriorTemperature = accCntTemp ?.toInt() ?: 20,
         gearStatus = autoGearStatus ?: "10",
+
+        // 胎压 - 如果API返回的胎压数据为null，则保持默认值0.0，等待单独的胎压API获取
         tirePressureFL = tirePressureFl?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureFR = tirePressureFr?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureRL = tirePressureRl?.toDoubleOrNull()?.div(100) ?: 0.0,
         tirePressureRR = tirePressureRr?.toDoubleOrNull()?.div(100) ?: 0.0,
-        tireTemperature = 0,
+        tireTemperature = 0,  // 轮胎温度由单独API获取
+
+        // 电池
         batteryHealth = batSOH ?: batHealth ?: 95,
         batteryTempMin = batMinTemp ?: 20,
         batteryTempMax = batMaxTemp ?: 28,
@@ -576,6 +796,9 @@ fun CarStatusApi.toVehicleStatus(
         voltage = voltage ?: 0.0,
         current = current ?: 0.0,
         chargePower = chargePower?.toDoubleOrNull() ?: 0.0,
+
+        // 车门 — 用 doorXOpenStatus 判断是否打开，用 doorXLockStatus 判断是否锁定
+        // 门锁状态：0=锁定, 1=解锁
         doors = DoorStatus(
             frontLeft = (door1OpenStatus ?: 0) == 1,
             frontRight = (door2OpenStatus ?: 0) == 1,
@@ -588,40 +811,60 @@ fun CarStatusApi.toVehicleStatus(
             rearRightLocked = (door4LockStatus ?: doorLockStatus ?: 0) == 0,
             trunkLocked = (doorLockStatus ?: 0) == 0
         ),
+
+        // 车窗
         windows = WindowStatus(
             frontLeft = (window1Status ?: 0) == 1,
             frontRight = (window2Status ?: 0) == 1,
             rearLeft = (window3Status ?: 0) == 1,
             rearRight = (window4Status ?: 0) == 1
         ),
+
+        // 车窗开度
         window1OpenDegree = window1OpenDegree ?: 0,
         window2OpenDegree = window2OpenDegree ?: 0,
         window3OpenDegree = window3OpenDegree ?: 0,
         window4OpenDegree = window4OpenDegree ?: 0,
+
+        // 灯光
         frontFogLight = frontFogLight == "1",
         leftTurnLight = leftTurnLight == "1",
         positionLight = positionLight == "1",
         rightTurnLight = rightTurnLight == "1",
         dipHeadLight = dipHeadLight == "1",
         lowBeamLight = lowBeamLight == "1",
+
+        // 钥匙 & 档位
         keyStatus = keyStatus ?: "0",
         autoGearStatus = autoGearStatus ?: "10",
+
+        // 电机温度
         tmActTemp = tmActTemp ?: 0,
         invActTemp = invActTemp ?: 0,
         obcOtpCur = obcOtpCur ?: 0.0,
+
+        // 充电
         vecChrgStsIndOn = vecChrgStsIndOn == 1,
         vecChargeSts = vecChargeSts ?: 0,
         chargingTimeRemaining = leftChargeTime,
         chargingRaw = charging ?: "0",
+
+        // 里程
         yesterMileage = yesterMileage ?: 0,
         avgFuel = avgFuel ?: 0.0,
         hybridMileageKm = hybridMileage?.toIntOrNull(),
+
+        // 驾驶状态
         steeringWheelAngle = strWhAng ?: "0",
         brakePedalPosition = brakPedalPos ?: "0",
         accPosition = accActPos ?: "0",
         averageSpeed = vehSpdAvgDrvn ?: "",
+
+        // 安全
         sentinelModeStatus = sentinelModeStatus == "1",
         limitFeedback = limitFeedback ?: "-1",
+
+        // 座椅
         seat1HotStatus = seat1HotStatus ?: "",
         seat2HotStatus = seat2HotStatus ?: "",
         seat3HotStatus = seat3HotStatus ?: "",
@@ -630,15 +873,24 @@ fun CarStatusApi.toVehicleStatus(
         seat2WindStatus = seat2WindStatus ?: "",
         seat3WindStatus = seat3WindStatus ?: "",
         seat4WindStatus = seat4WindStatus ?: "",
+
+        // 其他
         intelligentCarSwitch = intelligentCarSwitch ?: 0,
         collectTime = collectTime ?: "",
+
+        // ====== 诊断状态 (CheckStatus) ======
+        // ProblemConv(reverse=True): 值被反转 - 0=异常, 1=正常
+        // 例如 enginePow=0 表示"动力系统异常"，enginePow=1 表示"动力系统正常"
         enginePowStatus = checkEnginePow ?: 1,
         engineTempStatus = checkEngineTemp ?: 1,
+        // absio, pwrStrIo: BinarySensorConv 无反转 - 0=正常, 1=异常
         absStatus = checkAbsio ?: 0,
         powerSteeringStatus = checkPwrStrIo ?: 0
     )
+    return result
 }
 
+// Extension to convert CarInfoApi to CarInfo
 fun CarInfoApi.toCarInfo(): CarInfo {
     return CarInfo(
         carInfoId = carInfoId ?: 0,
